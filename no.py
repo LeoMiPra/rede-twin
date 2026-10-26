@@ -5,14 +5,19 @@ Etapa 3: o nó se registra no servidor por TCP e mantém essa conexão aberta,
 escutando o que o servidor mandar. A própria conexão serve de sinal de vida:
 enquanto ela existir, o servidor sabe que o processo do nó existe.
 
+Etapa 4: uma segunda thread envia um heartbeat UDP a cada INTERVALO_HEARTBEAT.
+Isso prova mais que a conexão TCP: prova que o programa está executando.
+Um processo suspenso (Ctrl+Z) mantém a conexão aberta, mas para de enviar.
+
 Ciclo de vida:
   1. Lê id e vizinhos da linha de comando.
   2. connect(): o kernel faz o handshake de três vias (SYN, SYN-ACK, ACK).
   3. Envia REGISTRO e espera a resposta: RESPOSTA ok=True ou ERRO.
-  4. Fica em recv() esperando mensagens do servidor (comandos, nas próximas
+  4. Inicia a thread de heartbeat.
+  5. Fica em recv() esperando mensagens do servidor (comandos, nas próximas
      etapas). recv() bloqueado não gasta CPU: o kernel acorda o processo
      quando chegam bytes.
-  5. Saída limpa (Ctrl+C ou kill): envia DESCONECTAR, fecha o lado de envio
+  6. Saída limpa (Ctrl+C ou kill): para o heartbeat, envia DESCONECTAR, fecha o lado de envio
      e espera o servidor fechar o dele.
 
 Rode com:  python no.py A B:3 C:1
@@ -23,6 +28,7 @@ import argparse
 import signal
 import socket
 import sys
+import threading
 import time
 
 import protocolo as p
@@ -31,8 +37,13 @@ import protocolo as p
 TEMPO_ESPERA_FECHAMENTO = 2.0
 
 
+_lock_log = threading.Lock()
+
+
 def log(id_no, texto):
-    print(f"[{time.strftime('%H:%M:%S')}] [{id_no}] {texto}", flush=True)
+    """print com horário. O lock evita que as duas threads misturem linhas."""
+    with _lock_log:
+        print(f"[{time.strftime('%H:%M:%S')}] [{id_no}] {texto}", flush=True)
 
 
 # ----------------------------------------------------------------------
@@ -124,6 +135,41 @@ def conectar_e_registrar(id_no, vizinhos):
     return sock, receptor
 
 
+def enviar_heartbeats(id_no, parar):
+    """
+    Thread de heartbeat: um datagrama a cada INTERVALO_HEARTBEAT segundos.
+
+    Por que UDP: o heartbeat é periódico e substituível. Se um se perder, o
+    próximo vem em 2 s; retransmitir um aviso velho, como o TCP faria, só
+    atrasaria a informação. Também não há conexão a manter: basta sendto().
+
+    O número de sequência permite ao servidor descartar datagramas fora de
+    ordem e contar os perdidos.
+    """
+    # Socket próprio, separado do TCP. Sem bind(): no primeiro sendto() o
+    # kernel atribui uma porta efêmera de origem.
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    destino = (p.HOST, p.PORTA_UDP)
+    seq = 0
+    try:
+        while True:
+            seq += 1
+            try:
+                p.enviar_udp(udp, p.criar_mensagem(p.HEARTBEAT, id=id_no, seq=seq), destino)
+            except OSError as e:
+                # sendto() quase nunca falha: o datagrama é entregue ao kernel
+                # e pronto. Se ninguém ouvir na porta UDP, o ICMP "port
+                # unreachable" não é relatado num socket UDP não conectado:
+                # o datagrama some em silêncio. Por isso só registramos.
+                log(id_no, f"falha ao enviar heartbeat {seq}: {e}")
+            # wait() em vez de sleep(): dorme o intervalo, mas acorda na hora
+            # se a saída limpa sinalizar o evento.
+            if parar.wait(p.INTERVALO_HEARTBEAT):
+                break
+    finally:
+        udp.close()
+
+
 def escutar(id_no, receptor):
     """
     Lê mensagens do servidor até a conexão acabar. Devolve True se terminou
@@ -176,6 +222,13 @@ def main():
     signal.signal(signal.SIGTERM, ao_receber_sigterm)
 
     sock, receptor = conectar_e_registrar(id_no, vizinhos)
+
+    # Só começa depois do registro aceito: antes disso o servidor ignoraria
+    # os heartbeats, pois o id ainda não está na tabela.
+    # daemon=True: se o nó sair por erro, a thread não segura o processo.
+    parar_heartbeat = threading.Event()
+    threading.Thread(target=enviar_heartbeats, args=(id_no, parar_heartbeat),
+                     daemon=True).start()
     try:
         # O Ctrl+C gera SIGINT, entregue à thread principal. Se ela estiver
         # bloqueada em recv(), a chamada é interrompida e o Python levanta
@@ -186,6 +239,7 @@ def main():
             sys.exit(1)
     except KeyboardInterrupt:
         log(id_no, "encerrando (sinal recebido)")
+        parar_heartbeat.set()
         desconectar(id_no, sock, receptor)
     except (OSError, p.ErroProtocolo) as e:
         # RST do servidor (ConnectionResetError) ou dados fora do protocolo.
