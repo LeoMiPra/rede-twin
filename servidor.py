@@ -13,6 +13,11 @@ Um processo travado ou suspenso (Ctrl+Z) continua com a conexão aberta, e o
 kernel dele continua respondendo ACK sozinho. Só um sinal periódico gerado
 pelo próprio programa prova que ele ainda está trabalhando.
 
+Etapa 5: monta o grafo da rede só com os enlaces utilizáveis e calcula o
+caminho de menor custo com Dijkstra. As rotas são recalculadas a cada
+consulta a partir do estado atual, então uma falha detectada já muda o
+próximo caminho pedido.
+
 Threads do servidor:
   - principal: accept() em loop;
   - uma por cliente TCP;
@@ -32,6 +37,7 @@ Fluxo de uma conexão de nó:
 Rode com:  python servidor.py
 """
 
+import heapq
 import socket
 import threading
 import time
@@ -52,6 +58,91 @@ def log(texto):
         print(f"[{time.strftime('%H:%M:%S')}] {texto}", flush=True)
 
 
+# ----------------------------------------------------------------------
+# Grafo e rotas (funções puras: recebem uma cópia do estado, sem lock)
+# ----------------------------------------------------------------------
+
+def enlace(a, b):
+    """Chave de um enlace sem direção: frozenset({'A','B'}) == frozenset({'B','A'})."""
+    return frozenset((a, b))
+
+
+def montar_grafo(nos, derrubados):
+    """
+    Devolve {id: {vizinho: custo}} só com os enlaces utilizáveis.
+
+    nos: {id: {"status", "vizinhos"}}; derrubados: conjunto de enlace(a, b).
+
+    Regras:
+      - Um enlace existe se pelo menos uma das pontas o declarou no registro;
+        assim basta escrever `no.py A B:4`, sem repetir `A:4` no B.
+      - Ele é utilizável só se as duas pontas estão ATIVO e o enlace não foi
+        derrubado manualmente. Um vizinho que nunca se registrou não está
+        ATIVO, então o enlace para ele não entra.
+      - Se as duas pontas declaram custos diferentes, vale o maior: na dúvida,
+        o caminho é considerado mais caro, não mais barato.
+    O grafo sai simétrico (A->B e B->A com o mesmo custo).
+    """
+    grafo = {i: {} for i, n in nos.items() if n["status"] == ATIVO}
+    for a, n in nos.items():
+        for b, custo in n["vizinhos"].items():
+            if a not in grafo or b not in grafo or enlace(a, b) in derrubados:
+                continue
+            atual = grafo[a].get(b)
+            custo = custo if atual is None else max(atual, custo)
+            grafo[a][b] = grafo[b][a] = custo
+    return grafo
+
+
+def dijkstra(grafo, origem, destino):
+    """
+    Caminho de menor custo de origem a destino.
+
+    Devolve (custo_total, [origem, ..., destino]) ou None se não houver
+    caminho (ou se uma das pontas não está no grafo, isto é, não está ATIVO).
+
+    A fila de prioridade (heapq) sempre entrega o nó ainda não fechado com a
+    menor distância conhecida. Como os custos são positivos, essa distância
+    já é definitiva: nenhum desvio posterior pode ficar mais barato.
+    """
+    if origem not in grafo or destino not in grafo:
+        return None
+
+    distancia = {origem: 0}
+    anterior = {}            # para reconstruir o caminho de trás para frente
+    fechados = set()
+    fila = [(0, origem)]     # (distância, id): o heap ordena pela distância,
+                             # e o id desempata de forma determinística
+    while fila:
+        d, u = heapq.heappop(fila)
+        if u in fechados:
+            # heapq não tem "diminuir prioridade": quando achamos uma distância
+            # melhor, empilhamos de novo. As entradas antigas são puladas aqui.
+            continue
+        fechados.add(u)
+        if u == destino:
+            break
+        for v, custo in grafo[u].items():
+            nova = d + custo
+            if v not in distancia or nova < distancia[v]:
+                distancia[v] = nova
+                anterior[v] = u
+                heapq.heappush(fila, (nova, v))
+
+    if destino not in fechados:
+        return None
+    caminho = [destino]
+    while caminho[-1] != origem:
+        caminho.append(anterior[caminho[-1]])
+    caminho.reverse()
+    return distancia[destino], caminho
+
+
+def listar_enlaces(grafo):
+    """[(a, b, custo), ...] com cada enlace uma vez só, a < b."""
+    return sorted((a, b, c) for a, viz in grafo.items() for b, c in viz.items() if a < b)
+
+
 class Servidor:
     def __init__(self, host=p.HOST, porta_tcp=p.PORTA_TCP, porta_udp=p.PORTA_UDP):
         self.host = host
@@ -68,6 +159,9 @@ class Servidor:
         #        "ultimo_heartbeat", "ultimo_seq"}
         # "sock" é None quando a conexão TCP do nó já acabou.
         self.nos = {}
+        # Enlaces derrubados pelo operador (etapa 6), como enlace(a, b).
+        # Também é estado compartilhado: só se acessa com self.lock.
+        self.enlaces_derrubados = set()
 
     # ------------------------------------------------------------------
     # Socket de escuta
@@ -180,6 +274,7 @@ class Servidor:
 
         self.responder(conexao, p.criar_mensagem(p.RESPOSTA, ok=True, id=id_no))
         log(f"Nó {id_no} registrado (vizinhos: {vizinhos})")
+        self.mostrar_tabela()
 
         # --- 3. Ouvir o nó até ele sair ou cair -------------------------
         motivo_fim = INATIVO
@@ -323,10 +418,32 @@ class Servidor:
         except OSError:
             pass
 
-    def mostrar_tabela(self):
+    def foto(self):
+        """
+        Copia, sob o lock, o que o cálculo de rotas precisa. O cálculo roda
+        depois, fora do lock: as outras threads (heartbeat, monitor, clientes)
+        não ficam esperando o Dijkstra terminar.
+        """
         with self.lock:
-            linhas = [f"  {i}: {n['status']}" for i, n in sorted(self.nos.items())]
-        log("Tabela de nós:\n" + ("\n".join(linhas) if linhas else "  (vazia)"))
+            nos = {i: {"status": n["status"], "vizinhos": dict(n["vizinhos"])}
+                   for i, n in self.nos.items()}
+            derrubados = set(self.enlaces_derrubados)
+        return nos, derrubados
+
+    def grafo_atual(self):
+        return montar_grafo(*self.foto())
+
+    def caminho(self, origem, destino):
+        """(custo, [nós]) pelo estado atual da rede, ou None se não há rota."""
+        return dijkstra(self.grafo_atual(), origem, destino)
+
+    def mostrar_tabela(self):
+        nos, derrubados = self.foto()
+        linhas = [f"  {i}: {n['status']}" for i, n in sorted(nos.items())]
+        enlaces = listar_enlaces(montar_grafo(nos, derrubados))
+        texto_enlaces = ", ".join(f"{a}-{b}({c})" for a, b, c in enlaces) or "(nenhum)"
+        log("Tabela de nós:\n" + ("\n".join(linhas) if linhas else "  (vazia)")
+            + f"\n  Enlaces utilizáveis: {texto_enlaces}")
 
 
 if __name__ == "__main__":
