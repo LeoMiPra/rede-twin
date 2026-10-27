@@ -52,6 +52,29 @@ RESPOSTA = "RESPOSTA"           # servidor -> cliente (TCP): resultado de um ped
 EVENTO = "EVENTO"               # servidor -> operador (TCP): aviso espontâneo
 ERRO = "ERRO"                   # servidor -> cliente (TCP): pedido recusado
 
+# Comandos do operador (campo "comando" de uma mensagem COMANDO; os
+# argumentos vão numa lista de strings no campo "args").
+TOPOLOGIA = "TOPOLOGIA"
+STATUS = "STATUS"
+CAMINHO = "CAMINHO"
+DERRUBAR = "DERRUBAR"
+RESTAURAR = "RESTAURAR"
+ASSINAR = "ASSINAR"
+
+# Forma de uso de cada comando: o servidor cita nos erros, o operador na ajuda.
+USO = {
+    TOPOLOGIA: "TOPOLOGIA",
+    STATUS: "STATUS [id]",
+    CAMINHO: "CAMINHO <origem> <destino>",
+    DERRUBAR: "DERRUBAR <nó> <nó>",
+    RESTAURAR: "RESTAURAR <nó> <nó>",
+    ASSINAR: "ASSINAR",
+}
+
+# Tipos de evento (campo "evento" de uma mensagem EVENTO)
+EVENTO_NO = "NO"            # um nó mudou de estado
+EVENTO_ENLACE = "ENLACE"    # um enlace foi derrubado ou restaurado
+
 
 class ErroProtocolo(Exception):
     """Dados recebidos não seguem o protocolo (JSON inválido, mensagem gigante...)."""
