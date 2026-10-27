@@ -98,6 +98,34 @@ def teste_malformada():
     caso("mensagem malformada gera ErroProtocolo")
 
 
+def teste_nan_recusado():
+    # NaN/Infinity não são JSON padrão; o protocolo recusa nos dois sentidos.
+    a, b = socket.socketpair()
+    receptor = p.ReceptorTCP(b)
+    a.send(b'{"tipo":"REGISTRO","vizinhos":{"B":NaN}}\n')
+    try:
+        receptor.receber()
+        raise AssertionError("deveria ter falhado")
+    except p.ErroProtocolo:
+        pass
+    try:
+        p.enviar_tcp(a, p.criar_mensagem(p.REGISTRO, custo=float("inf")))
+        raise AssertionError("deveria ter falhado")
+    except ValueError:
+        pass
+    a.close(); b.close()
+    caso("NaN e Infinity recusados")
+
+
+def teste_validacoes():
+    assert p.id_valido("A") and p.id_valido("roteador-1")
+    assert not p.id_valido("") and not p.id_valido("A B") and not p.id_valido(["A"])
+    assert p.custo_valido(1) and p.custo_valido(0.5)
+    for ruim in (0, -1, True, "3", float("nan"), float("inf")):
+        assert not p.custo_valido(ruim), ruim
+    caso("validação de id e custo")
+
+
 def teste_udp():
     servidor = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     servidor.bind((p.HOST, 0))          # porta 0: o sistema escolhe uma livre
@@ -122,5 +150,7 @@ if __name__ == "__main__":
     teste_quebra_de_linha_no_conteudo()
     teste_fechamento()
     teste_malformada()
+    teste_nan_recusado()
+    teste_validacoes()
     teste_udp()
     print("\nTodos os testes passaram.")

@@ -42,13 +42,13 @@ Responda sempre em português do Brasil. Prefira explicações de causa e efeito
 0. Ambiente — feito
 1. Protocolo — feito (`python teste_protocolo.py`)
 2. Servidor mínimo com registro — feito (testar com `nc 127.0.0.1 5000`)
-3. Nó mínimo: argumentos, conexão, registro, escuta TCP.
+3. Nó mínimo: argumentos, conexão, registro, escuta TCP — feito
    Teste: 5 nós juntos; id repetido recusado; Ctrl+C num nó detectado na hora.
-4. Heartbeat UDP no nó; receptor UDP e thread monitor no servidor.
+4. Heartbeat UDP no nó; receptor UDP e thread monitor no servidor — feito
    Teste: Ctrl+Z num nó vira INATIVO em ~6 s; `fg` o traz de volta a ATIVO.
 5. Grafo e Dijkstra (`heapq`) só sobre enlaces utilizáveis
-   (ambos os nós ATIVO e enlace não derrubado manualmente).
-6. Operador: TOPOLOGIA, STATUS, CAMINHO, DERRUBAR, RESTAURAR, ASSINAR.
-7. Acabamento: erros tratados, `demo.sh`, README.
+   (ambos os nós ATIVO e enlace não derrubado manualmente) — feito (`python teste_rotas.py`)
+6. Operador: TOPOLOGIA, STATUS, CAMINHO, DERRUBAR, RESTAURAR, ASSINAR — feito
+7. Acabamento: erros tratados, `demo.sh`, README — feito
 
 Só avance de etapa quando o teste da etapa passar. Faça um commit por etapa.

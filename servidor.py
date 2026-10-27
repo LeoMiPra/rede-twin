@@ -45,7 +45,9 @@ Rode com:  python servidor.py
 
 import heapq
 import queue
+import signal
 import socket
+import sys
 import threading
 import time
 
@@ -297,7 +299,13 @@ class Servidor:
         # permite reutilizá-la imediatamente ao reiniciar o servidor.
         escuta.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        escuta.bind((self.host, self.porta_tcp))
+        try:
+            escuta.bind((self.host, self.porta_tcp))
+        except OSError as e:
+            # Tipicamente EADDRINUSE: outro servidor ainda está rodando.
+            escuta.close()
+            log(f"Não foi possível usar a porta TCP {self.porta_tcp}: {e}")
+            sys.exit(1)
         escuta.listen()   # fila de conexões pendentes com o tamanho padrão do sistema
         log(f"Servidor ouvindo TCP em {self.host}:{self.porta_tcp}")
 
@@ -307,7 +315,13 @@ class Servidor:
         # datagramas de todos os nós. Também não precisa de SO_REUSEADDR,
         # porque sem conexão não existe TIME_WAIT.
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.bind((self.host, self.porta_udp))
+        try:
+            udp.bind((self.host, self.porta_udp))
+        except OSError as e:
+            escuta.close()
+            udp.close()
+            log(f"Não foi possível usar a porta UDP {self.porta_udp}: {e}")
+            sys.exit(1)
         log(f"Servidor ouvindo UDP em {self.host}:{self.porta_udp}")
         threading.Thread(target=self.receber_heartbeats, args=(udp,), daemon=True).start()
         threading.Thread(target=self.monitorar, daemon=True).start()
@@ -322,7 +336,7 @@ class Servidor:
                     daemon=True,
                 ).start()
         except KeyboardInterrupt:
-            log("Encerrando servidor (Ctrl+C)")
+            log("Encerrando servidor")
         finally:
             escuta.close()
             udp.close()
@@ -351,6 +365,10 @@ class Servidor:
         except OSError as e:
             # ConnectionResetError e similares: a conexão caiu de forma abrupta.
             log(f"{endereco[1]} conexão perdida: {e}")
+        except Exception as e:
+            # Defeito do servidor, não da rede. Só esta conexão é perdida; as
+            # outras threads e a tabela continuam funcionando.
+            log(f"{endereco[1]} erro inesperado ({type(e).__name__}: {e}); conexão encerrada")
         finally:
             conexao.close()
 
@@ -479,7 +497,10 @@ class Servidor:
         """Devolve a mensagem de resposta (RESPOSTA ou ERRO) para um COMANDO."""
         if msg["tipo"] != p.COMANDO:
             return p.criar_mensagem(p.ERRO, motivo=f"esperava {p.COMANDO}, veio {msg['tipo']}")
-        comando = str(msg.get("comando", "")).upper()
+        comando = msg.get("comando")
+        if not isinstance(comando, str):
+            return p.criar_mensagem(p.ERRO, motivo="'comando' deve ser um texto")
+        comando = comando.upper()
         args = msg.get("args", [])
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
             return p.criar_mensagem(p.ERRO, motivo="'args' deve ser uma lista de textos")
@@ -641,11 +662,22 @@ class Servidor:
             if msg["tipo"] != p.HEARTBEAT:
                 log(f"Datagrama UDP ignorado (tipo {msg['tipo']})")
                 continue
-            self.registrar_heartbeat(msg)
+            try:
+                self.registrar_heartbeat(msg)
+            except Exception as e:
+                # Esta thread é única: se ela morrer, nenhum heartbeat é mais
+                # processado e todos os nós viram INATIVO. Um datagrama
+                # inesperado nunca pode derrubá-la.
+                log(f"Heartbeat descartado ({type(e).__name__}: {e})")
 
     def registrar_heartbeat(self, msg):
         id_no = msg.get("id")
         seq = msg.get("seq")
+        if not p.id_valido(id_no):
+            # Sem esta verificação, um id que fosse lista viraria chave de
+            # dicionário e levantaria TypeError.
+            log(f"Heartbeat com id inválido: {id_no!r}")
+            return
         if not isinstance(seq, int) or isinstance(seq, bool):
             log(f"Heartbeat de {id_no} sem número de sequência válido")
             return
@@ -715,14 +747,16 @@ class Servidor:
     @staticmethod
     def validar_registro(id_no, vizinhos):
         """Devolve um texto descrevendo o problema, ou None se estiver tudo certo."""
-        if not isinstance(id_no, str) or not id_no.strip():
-            return "campo 'id' ausente ou vazio"
+        if not p.id_valido(id_no):
+            return "campo 'id' deve ser um texto não vazio e sem espaços"
         if not isinstance(vizinhos, dict):
             return "campo 'vizinhos' deve ser um objeto {id: custo}"
         for vizinho, custo in vizinhos.items():
+            if not p.id_valido(vizinho):
+                return f"id de vizinho inválido: '{vizinho}'"
             if vizinho == id_no:
                 return "um nó não pode ser vizinho de si mesmo"
-            if not isinstance(custo, (int, float)) or isinstance(custo, bool) or custo <= 0:
+            if not p.custo_valido(custo):
                 return f"custo inválido para o vizinho '{vizinho}'"
         return None
 
@@ -762,5 +796,13 @@ class Servidor:
             + f"\n  Enlaces utilizáveis: {texto_enlaces}")
 
 
+def ao_receber_sigterm(_sinal, _quadro):
+    # `kill <pid>` (usado pelo demo.sh) encerra pelo mesmo caminho do Ctrl+C:
+    # o finally de iniciar() fecha os sockets de escuta, e o fim do processo
+    # faz o kernel fechar as conexões, mandando FIN para cada nó e operador.
+    raise KeyboardInterrupt
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, ao_receber_sigterm)
     Servidor().iniciar()

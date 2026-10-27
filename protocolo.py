@@ -21,6 +21,7 @@ Por que o enquadramento existe:
 """
 
 import json
+import math
 
 # ---------------------------------------------------------------------------
 # Constantes do projeto
@@ -85,15 +86,39 @@ def criar_mensagem(tipo, **campos):
     return {"tipo": tipo, **campos}
 
 
+def id_valido(texto):
+    """
+    Um id de nó é um texto não vazio e sem espaços. Sem espaços porque o
+    operador separa os argumentos dos comandos por espaço: um nó "A B" nunca
+    poderia ser citado num CAMINHO.
+    """
+    return isinstance(texto, str) and texto != "" and not any(c.isspace() for c in texto)
+
+
+def custo_valido(custo):
+    """Número positivo e finito (bool é subclasse de int em Python, por isso a exclusão)."""
+    return (isinstance(custo, (int, float)) and not isinstance(custo, bool)
+            and math.isfinite(custo) and custo > 0)
+
+
+def _rejeitar_constante(nome):
+    # O json do Python aceita NaN, Infinity e -Infinity por padrão, mas eles
+    # não fazem parte do JSON padrão (RFC 8259). Um custo NaN passaria por
+    # "custo > 0" (toda comparação com NaN é falsa) e estragaria o Dijkstra.
+    raise ErroProtocolo(f"valor não permitido em JSON: {nome}")
+
+
 def _serializar(msg):
     """dict -> bytes JSON em UTF-8, sem espaços desnecessários."""
-    return json.dumps(msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # allow_nan=False: também nunca ENVIAMOS NaN/Infinity.
+    return json.dumps(msg, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
 
 
 def _desserializar(dados):
     """bytes JSON -> dict. Converte falhas em ErroProtocolo."""
     try:
-        msg = json.loads(dados.decode("utf-8"))
+        msg = json.loads(dados.decode("utf-8"), parse_constant=_rejeitar_constante)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ErroProtocolo(f"mensagem malformada: {e}") from e
     if not isinstance(msg, dict) or "tipo" not in msg:

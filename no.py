@@ -53,7 +53,7 @@ def log(id_no, texto):
 def vizinho_custo(texto):
     """Converte 'B:3' em ('B', 3). Usado como type= do argparse."""
     nome, sep, custo = texto.partition(":")
-    if not sep or not nome:
+    if not sep or not p.id_valido(nome):
         raise argparse.ArgumentTypeError(f"'{texto}' não está no formato VIZINHO:CUSTO")
     try:
         valor = int(custo)
@@ -62,8 +62,9 @@ def vizinho_custo(texto):
             valor = float(custo)
         except ValueError:
             raise argparse.ArgumentTypeError(f"custo '{custo}' não é um número") from None
-    if valor <= 0:
-        raise argparse.ArgumentTypeError(f"custo de '{nome}' deve ser positivo")
+    # float() aceita "nan" e "inf"; custo_valido os recusa.
+    if not p.custo_valido(valor):
+        raise argparse.ArgumentTypeError(f"custo de '{nome}' deve ser um número positivo")
     return nome, valor
 
 
@@ -73,6 +74,8 @@ def ler_argumentos():
     parser.add_argument("vizinhos", nargs="*", type=vizinho_custo,
                         metavar="VIZINHO:CUSTO", help="enlaces do nó (ex.: B:3 C:1)")
     args = parser.parse_args()
+    if not p.id_valido(args.id):
+        parser.error("o id não pode ser vazio nem conter espaços")
 
     vizinhos = {}
     for nome, custo in args.vizinhos:
